@@ -1,60 +1,154 @@
-# Sample workflow for building and deploying a mdBook site to GitHub Pages
-#
-# To get started with mdBook see: https://rust-lang.github.io/mdBook/index.html
-#
-name: Deploy mdBook site to Pages
+name: Convert Markdown to HTML
 
 on:
-  # Runs on pushes targeting the default branch
   push:
-    branches: ["main"]
-
-  # Allows you to run this workflow manually from the Actions tab
-  workflow_dispatch:
-
-# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-
-# Allow only one concurrent deployment, skipping runs queued between the run in-progress and latest queued.
-# However, do NOT cancel in-progress runs as we want to allow these production deployments to complete.
-concurrency:
-  group: "pages"
-  cancel-in-progress: false
+    paths:
+      - '**.md'
+    branches:
+      - main
 
 jobs:
-  # Build job
-  build:
+  convert-markdown:
     runs-on: ubuntu-latest
-    env:
-      MDBOOK_VERSION: 0.4.36
     steps:
-      - uses: actions/checkout@v4
-      - name: Install mdBook
-        run: |
-          curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf -y | sh
-          rustup update
-          cargo install --version ${MDBOOK_VERSION} mdbook
-      - name: Setup Pages
-        id: pages
-        uses: actions/configure-pages@v5
-      - name: Build with mdBook
-        run: mdbook build
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+      - uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
         with:
-          path: ./book
+          node-version: '18'
+          
+      - name: Install dependencies
+        run: npm install -g markdown-it
+        
+      - name: Generate navigation and convert files
+        run: |
+          # Function to generate navigation HTML
+          generate_nav() {
+            local current_path="$1"
+            echo "<nav class='site-nav'>"
+            
+            # Add home link
+            echo "<a href='/'>Home</a>"
+            
+            # Get all directories with markdown files
+            find . -type d | sort | while read -r dir; do
+              if [ -n "$(find "$dir" -maxdepth 1 -name '*.md')" ]; then
+                dirname=${dir#./}
+                if [ -n "$dirname" ]; then
+                  echo "<div class='nav-section'>"
+                  echo "<h3>${dirname}</h3>"
+                  # List MD files in this directory
+                  find "$dir" -maxdepth 1 -name "*.md" | sort | while read -r md_file; do
+                    filename=$(basename "$md_file")
+                    if [ "$filename" != "README.md" ]; then
+                      title=$(head -n 1 "$md_file" | sed 's/^#\s*//')
+                      link="${md_file%.md}.html"
+                      echo "<a href='$link'>$title</a>"
+                    fi
+                  done
+                  echo "</div>"
+                fi
+              fi
+            done
+            echo "</nav>"
+          }
 
-  # Deployment job
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+          # Generate main template
+          cat > template.html << 'EOL'
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <link rel="stylesheet" href="/styles.css">
+            <title>{{TITLE}}</title>
+          </head>
+          <body>
+            {{NAV}}
+            <main>
+              {{CONTENT}}
+            </main>
+          </body>
+          </html>
+          EOL
+
+          # Convert each markdown file
+          find . -name "*.md" | while read -r file; do
+            if [ "$file" != "./README.md" ]; then
+              outfile="${file%.md}.html"
+              title=$(head -n 1 "$file" | sed 's/^#\s*//')
+              content=$(markdown-it "$file")
+              nav=$(generate_nav "$file")
+              
+              # Replace placeholders in template
+              sed "s/{{TITLE}}/$title/g" template.html > "$outfile"
+              sed -i "s#{{NAV}}#$nav#g" "$outfile"
+              sed -i "s#{{CONTENT}}#$content#g" "$outfile"
+            fi
+          done
+          
+      - name: Create styles.css
+        run: |
+          cat > styles.css << 'EOL'
+          body {
+            margin: 0;
+            padding: 0;
+            font-family: system-ui;
+            line-height: 1.6;
+            display: flex;
+          }
+          
+          .site-nav {
+            width: 250px;
+            height: 100vh;
+            padding: 20px;
+            background: #f5f5f5;
+            position: fixed;
+            overflow-y: auto;
+          }
+          
+          .nav-section {
+            margin: 20px 0;
+          }
+          
+          .nav-section h3 {
+            margin: 0 0 10px 0;
+            font-size: 1.1em;
+            color: #333;
+          }
+          
+          .site-nav a {
+            display: block;
+            padding: 5px 0;
+            color: #0066cc;
+            text-decoration: none;
+          }
+          
+          main {
+            margin-left: 290px;
+            padding: 40px;
+            max-width: 800px;
+          }
+          
+          @media (max-width: 768px) {
+            body { flex-direction: column; }
+            .site-nav {
+              width: 100%;
+              height: auto;
+              position: relative;
+            }
+            main {
+              margin-left: 0;
+              padding: 20px;
+            }
+          }
+          EOL
+          
+      - name: Commit and push changes
+        run: |
+          git config --global user.name 'GitHub Actions Bot'
+          git config --global user.email 'actions@github.com'
+          git add *.html styles.css
+          git commit -m "Convert Markdown to HTML with navigation" || echo "No changes to commit"
+          git push
